@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Loader2, Save } from 'lucide-react'
 import { toast } from 'sonner'
 import { PhotoCapture } from './photo-capture'
+import { loadFaceApiModels } from '@/lib/face-api'
 import type { Person, PersonFormData } from '@/lib/types'
 
 interface PersonFormProps {
@@ -43,14 +44,7 @@ export function PersonForm({ person, onSave, onCancel }: PersonFormProps) {
 
       if (form.photo_base64) {
         try {
-          const faceapi = await import('@vladmandic/face-api')
-
-          const MODEL_URL = '/models' // must be hosted locally; external URLs are forbidden
-          await Promise.all([
-            faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
-            faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-            faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-          ])
+          const faceapi = await loadFaceApiModels()
 
           const img = new Image()
           img.crossOrigin = 'anonymous'

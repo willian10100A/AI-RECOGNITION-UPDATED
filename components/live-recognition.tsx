@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import useSWR from 'swr'
 import { MatchedPersonPanel } from './matched-person-panel'
+import { loadFaceApiModels } from '@/lib/face-api'
 import type { Person, RecognitionMatch, RecognitionLog } from '@/lib/types'
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json())
@@ -24,6 +25,10 @@ export function LiveRecognition() {
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const animFrameRef = useRef<number>(0)
+  const lastDetectionAtRef = useRef(0)
+  const lastQualityUpdateAtRef = useRef(0)
+  const lastZoomCaptureAtRef = useRef(0)
+  const lastFpsUpdateAtRef = useRef(0)
   const detectingRef = useRef(false)
   const faceapiRef = useRef<FaceApi | null>(null)
   const matcherRef = useRef<InstanceType<FaceApi['FaceMatcher']> | null>(null)
@@ -86,15 +91,8 @@ export function LiveRecognition() {
     if (modelsLoaded && faceapiRef.current) return true
 
     try {
-      const faceapi = await import('@vladmandic/face-api')
+      const faceapi = await loadFaceApiModels()
       faceapiRef.current = faceapi
-
-      const MODEL_URL = '/models' // only local files are allowed; no external fetch
-      await Promise.all([
-        faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
-        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-      ])
 
       setModelsLoaded(true)
 
@@ -109,6 +107,10 @@ export function LiveRecognition() {
       return false
     }
   }, [modelsLoaded, persons, buildMatcher])
+
+  useEffect(() => {
+    void loadModels()
+  }, [loadModels])
 
   const captureZoomFace = useCallback(
     (
@@ -279,24 +281,46 @@ export function LiveRecognition() {
       return
     }
 
+    // Run inference at a limited rate; keep the camera preview smooth.
+    const now = performance.now()
+    if (now - lastDetectionAtRef.current < 120) {
+      animFrameRef.current = requestAnimationFrame(runDetection)
+      return
+    }
+    lastDetectionAtRef.current = now
+
     detectingRef.current = true
     const startTime = performance.now()
 
     try {
       const detections = await faceapi
-        .detectAllFaces(video)
+        .detectAllFaces(
+          video,
+          new faceapi.SsdMobilenetv1Options({
+            minConfidence: 0.45,
+            maxResults: 10,
+          })
+        )
         .withFaceLandmarks()
         .withFaceDescriptors()
 
       // auto-adjust zoom quality based on movement and size
-      adjustZoomQuality(detections)
+      if (performance.now() - lastQualityUpdateAtRef.current > 300) {
+        adjustZoomQuality(detections)
+        lastQualityUpdateAtRef.current = performance.now()
+      }
 
       const elapsed = performance.now() - startTime
-      setDetectionFps(Math.round(1000 / elapsed))
+      if (performance.now() - lastFpsUpdateAtRef.current > 1000) {
+        setDetectionFps(Math.round(1000 / elapsed))
+        lastFpsUpdateAtRef.current = performance.now()
+      }
 
       if (detections.length > 0 && matcherRef.current) {
         const matches: RecognitionMatch[] = []
         const labels: Array<string | null> = []
+        const shouldRefreshZooms =
+          performance.now() - lastZoomCaptureAtRef.current > 500
         const zooms: string[] = []
 
         for (let i = 0; i < detections.length; i++) {
@@ -330,7 +354,7 @@ export function LiveRecognition() {
             }
           }
 
-          if (labels[i]) {
+          if (shouldRefreshZooms && labels[i]) {
             const zoom = captureZoomFace(video, d.detection.box, zoomQuality)
             if (zoom) zooms.push(zoom)
           }
@@ -344,7 +368,10 @@ export function LiveRecognition() {
           video.videoWidth,
           video.videoHeight
         )
-        setFaceZooms(zooms)
+        if (shouldRefreshZooms) {
+          lastZoomCaptureAtRef.current = performance.now()
+          setFaceZooms(zooms)
+        }
       } else {
         setCurrentMatches([])
         setFaceZooms([])
@@ -383,14 +410,12 @@ export function LiveRecognition() {
     setError(null)
 
     try {
-      const modelsOk = await loadModels()
-      if (!modelsOk) {
-        setLoading(false)
-        return
-      }
-
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: 1280, height: 720 },
+        video: {
+          facingMode: 'user',
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        },
       })
       streamRef.current = stream
 
@@ -402,6 +427,8 @@ export function LiveRecognition() {
       }
 
       setCameraActive(true)
+  setLoading(false)
+  void loadModels()
     } catch (err) {
       console.error('Camera start failed:', err)
       setError('Failed to access camera. Please check permissions.')
@@ -568,6 +595,13 @@ export function LiveRecognition() {
             <div className="flex flex-col items-center gap-3 text-center">
               <AlertCircle className="h-10 w-10 text-destructive" />
               <p className="max-w-xs text-sm text-destructive">{error}</p>
+            </div>
+          )}
+
+          {cameraActive && !modelsLoaded && !error && (
+            <div className="absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-black/70 px-3 py-2 text-xs text-white">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Preparing face recognition…
             </div>
           )}
 
